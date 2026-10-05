@@ -1,203 +1,156 @@
-name: Cloudflare IP Speedtest
+name: CloudFlare IP 自动优选更新
 
+# 触发条件：
+# 1. 每12小时自动运行（0点和12点 UTC，即北京时间8点和20点）
+# 2. 手动触发（workflow_dispatch）
+# 3. push到main分支时
 on:
-  push:
-    branches: [ main, master ]
   schedule:
-    # 每 6 小时自动跑一次（UTC 0/6/12/18 点）
-    - cron: '0 */6 * * *'
+    - cron: '0 */12 * * *'
   workflow_dispatch:
-    inputs:
-      speed_limit:
-        description: '最低下载速度阈值(MB/s)，留空用默认'
-        required: false
-        default: '20'
-        type: string
-      ping_count:
-        description: '延迟测速线程数'
-        required: false
-        default: '500'
-        type: string
-      download_count:
-        description: '下载测速数量'
-        required: false
-        default: '50'
-        type: string
-      download_time:
-        description: '单IP测速时长(秒)'
-        required: false
-        default: '10'
-        type: string
-
-# 允许工作流把结果提交回仓库
-permissions:
-  contents: write
-
-# 同一时间只跑一个，避免结果互相覆盖
-concurrency:
-  group: cf-speedtest
-  cancel-in-progress: false
+  push:
+    branches:
+      - main
+    paths:
+      - 'ip-ranges.txt'
+      - '.github/workflows/cf-ip-update.yml'
 
 jobs:
-  speedtest:
+  update-ips:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
-      - name: 检出仓库
+      - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: 下载并准备测速程序
-        run: |
-          set -e
-          URLS="
-          https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
-          https://ghfast.top/https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
-          https://gh-proxy.com/https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/cfst_linux_amd64.tar.gz
-          "
-          OK=0
-          for u in $URLS; do
-            echo "尝试下载：$u"
-            if wget -q --timeout=30 --tries=2 "$u" -O cfst.tar.gz; then
-              echo "✅ 下载成功"
-              OK=1
-              break
-            fi
-          done
-          if [ "$OK" != "1" ]; then
-            echo "❌ 所有下载地址均失败"
-            exit 1
-          fi
+      - name: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
 
+      - name: 安装 CloudflareSpeedTest
+        run: |
+          # 下载最新版 CloudflareSpeedTest
+          wget -q https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/CloudflareST_linux_amd64.tar.gz -O cfst.tar.gz
           tar -xzf cfst.tar.gz
-          echo "--- 解压后的文件 ---"
-          ls -la
+          chmod +x CloudflareST
+          ./CloudflareST -v
 
-          # 自动查找二进制，无论它在根目录还是子目录
-          BIN=$(find . -type f -name cfst | head -n1)
-          echo "找到二进制：$BIN"
-          cp "$BIN" ./cfst
-          chmod +x ./cfst
-          ./cfst -v || true
-
-      - name: 合并IP列表（自定义IP优先）
+      - name: 准备待扫描IP段
         run: |
-          cat custom_ip.txt ip.txt \
-            | grep -v '^#' \
-            | grep -v '^$' \
-            | sed 's/#.*//' \
-            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
-            | sort -u > merged_ip.txt
-          echo "合并后待测IP段数量：$(wc -l < merged_ip.txt)"
-          echo "--- 前 20 行 ---"
-          head -20 merged_ip.txt
-
-      - name: 测速（阈值不达标自动降级，保证出结果）
-        run: |
-          SPEED="${{ github.event.inputs.speed_limit }}"
-          [ -z "$SPEED" ] && SPEED=20
-          PING="${{ github.event.inputs.ping_count }}"
-          [ -z "$PING" ] && PING=500
-          DN="${{ github.event.inputs.download_count }}"
-          [ -z "$DN" ] && DN=50
-          DT="${{ github.event.inputs.download_time }}"
-          [ -z "$DT" ] && DT=10
-
-          echo "目标阈值：${SPEED} MB/s"
-          USED_SPEED=""
-
-          # 依次尝试：目标阈值 -> 20 -> 10 -> 5 -> 0(不限速，保底)
-          for SL in "$SPEED" 20 10 5 0; do
-            echo "=================================================="
-            echo ">>> 使用速度阈值 ${SL} MB/s 测速"
-            rm -f result.csv
-            ./cfst -f merged_ip.txt -p 443 -n "$PING" -dn "$DN" -dt "$DT" -tl 500 -sl "$SL" -o result.csv || true
-            if [ -f result.csv ] && [ "$(wc -l < result.csv)" -gt 1 ]; then
-              USED_SPEED="$SL"
-              echo "✅ ${SL} MB/s 下得到结果"
-              break
-            fi
-            echo "⚠️  ${SL} MB/s 下无达标IP，继续降级"
-          done
-
-          # 极端情况兜底
-          if [ -z "$USED_SPEED" ]; then
-            USED_SPEED=0
-            printf 'IP 地址,已发送,已接收,丢包率,平均延迟,下载速度(MB/s),地区码\n' > result.csv
-            echo "⚠️  所有阈值均无结果，生成空报告"
+          # 把用户自定义的IP段写入 ip-ranges.txt（如果文件存在则用现有内容）
+          if [ ! -f ip-ranges.txt ]; then
+            cat > ip-ranges.txt << 'EOF'
+          198.41.213.0/24
+          104.19.197.0/24
+          104.18.128.0/24
+          172.64.32.0/24
+          104.17.0.0/24
+          104.18.62.0/24
+          104.18.36.0/24
+          104.17.1.0/24
+          104.18.132.0/24
+          104.16.36.0/24
+          172.67.133.0/24
+          104.18.100.0/24
+          104.27.204.0/24
+          172.64.150.0/24
+          104.16.35.0/24
+          104.16.2.0/24
+          104.18.131.0/24
+          104.19.199.0/24
+          104.19.198.0/24
+          104.19.195.0/24
+          104.16.0.0/24
+          104.18.129.0/24
+          104.17.2.0/24
+          104.16.1.0/24
+          104.19.196.0/24
+          141.101.115.0/24
+          104.18.130.0/24
+          172.64.151.0/24
+          104.18.35.0/24
+          141.101.122.0/24
+          EOF
           fi
+          echo "=== 待扫描IP段 ==="
+          cat ip-ranges.txt
+          echo "=== IP段数量 ==="
+          grep -c '/' ip-ranges.txt
 
-          echo "USED_SPEED=$USED_SPEED" >> $GITHUB_ENV
-
-      - name: 生成结果文件
+      - name: 运行 CloudflareSpeedTest 测速
         run: |
-          mkdir -p results
-          TIME=$(date +"%Y%m%d_%H%M")
-          NOW=$(date '+%Y-%m-%d %H:%M:%S')
-          USED_SPEED="${{ env.USED_SPEED }}"
-          TARGET_SPEED="${{ github.event.inputs.speed_limit }}"
-          [ -z "$TARGET_SPEED" ] && TARGET_SPEED=20
+          # 测速参数说明：
+          # -f ip-ranges.txt  : 使用自定义IP段
+          # -n 500            : 测速线程数，越大越快
+          # -t 8              : 延迟测试次数（对每个IP测8次取平均）
+          # -dn 10            : 下载测速数量（从延迟合格的IP里选10个测下载速度）
+          # -dt 8             : 下载测速时间（秒）
+          # -tl 300           : 延迟上限(ms)，超过300ms直接淘汰
+          # -tll 0            : 延迟下限(ms)，0=不限制
+          # -sl 0             : 下载速度下限(MB/s)，0=不限制（可按需设置，如1=至少1MB/s）
+          # -p 0              : 显示结果数量，0=全部
+          # -o result.csv     : 结果输出到csv
+          # -url              : 测速用的文件URL，默认Cloudflare官方CDN
+          timeout 15m ./CloudflareST \
+            -f ip-ranges.txt \
+            -n 500 \
+            -t 8 \
+            -dn 20 \
+            -dt 8 \
+            -tl 300 \
+            -sl 0 \
+            -p 0 \
+            -o result.csv \
+            -httping
+          echo "=== 测速完成，result.csv 内容 ==="
+          cat result.csv
 
-          # ---- Markdown ----
-          {
-            echo "# Cloudflare 优选IP测速结果"
-            echo ""
-            echo "- 测速时间：${NOW}"
-            echo "- 目标速度阈值：${TARGET_SPEED} MB/s"
-            echo "- 本次实际采用阈值：${USED_SPEED} MB/s"
-            echo "- 候选IP段数量：$(wc -l < merged_ip.txt)"
-            echo ""
-            if [ "$USED_SPEED" != "$TARGET_SPEED" ]; then
-              echo "> ⚠️ 本次在 ${TARGET_SPEED} MB/s 下没有IP达标，已自动降级到 **${USED_SPEED} MB/s** 出结果。"
-              echo "> GitHub Actions 服务器位于美国，跨太平洋访问港/日/韩节点速度有限，实测上限约 40~50 MB/s。"
-              echo ""
-            fi
-            echo "| 排名 | IP地址 | 延迟(ms) | 下载速度(MB/s) | 丢包率 | 地区码 |"
-            echo "|------|--------|----------|----------------|--------|--------|"
-          } > results/latest.md
-
-          # ---- 纯文本 ----
-          {
-            echo "# Cloudflare 优选IP ${TIME}"
-            echo "测速时间: ${NOW}"
-            echo "本次阈值: ${USED_SPEED} MB/s"
-            echo ""
-          } > results/latest.txt
-
-          # ---- CSV（原始结果直接保留）----
-          cp result.csv results/latest.csv
-
-          # ---- 解析结果（CSV 为 7 列：IP,已发送,已接收,丢包率,平均延迟,下载速度,地区码）----
-          DATA_ROWS=$(( $(wc -l < result.csv) - 1 ))
-          if [ "$DATA_ROWS" -gt 0 ]; then
-            rank=0
-            awk -F',' 'NR>1 && $1 ~ /^[0-9]/ {gsub(/\r/,""); print}' result.csv \
-              | sort -t',' -k6,6 -rn \
-              | while IFS=',' read -r ip sent recv loss ping speed region; do
-                  rank=$((rank+1))
-                  echo "| $rank | $ip | $ping | $speed | $loss | $region |" >> results/latest.md
-                  echo "${rank}. ${ip}  延迟:${ping}ms  速度:${speed}MB/s  丢包:${loss}  地区:${region}" >> results/latest.txt
-                done
-          else
-            echo "| - | 暂无达标的IP | - | - | - | - |" >> results/latest.md
-            echo "暂无达标的IP" >> results/latest.txt
-          fi
-
-          # ---- 历史备份，只保留最近 10 次 ----
-          cp results/latest.md "results/result_${TIME}.md"
-          cp results/latest.txt "results/result_${TIME}.txt"
-          ls -1t results/result_*.md 2>/dev/null | tail -n +11 | xargs -r rm -f
-          ls -1t results/result_*.txt 2>/dev/null | tail -n +11 | xargs -r rm -f
-
-          echo "===== 本次结果预览 ====="
-          cat results/latest.md
-
-      - name: 提交并推送结果
+      - name: 提取纯IP并更新 ips.txt
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f results/
-          if git diff --cached --quiet; then
-            echo "无新结果可提交"
+          python3 << 'PYEOF'
+          import csv
+
+          # 读取result.csv，跳过表头
+          ips = []
+          with open('result.csv', 'r', encoding='utf-8') as f:
+              reader = csv.reader(f)
+              header = next(reader)  # 跳过表头
+              print("表头:", header)
+              for row in reader:
+                  if row and len(row) >= 1:
+                      ip = row[0].strip()
+                      if ip:
+                          ips.append(ip)
+
+          print(f"共筛选出 {len(ips)} 个IP")
+
+          # 只保留纯IP，每行一个，覆盖写入 ips.txt
+          with open('ips.txt', 'w', encoding='utf-8') as f:
+              for ip in ips:
+                  f.write(ip + '\n')
+
+          print("=== 生成的 ips.txt 内容预览（前20行） ===")
+          with open('ips.txt', 'r', encoding='utf-8') as f:
+              lines = f.readlines()
+              for line in lines[:20]:
+                  print(line.rstrip())
+          print(f"... 共 {len(lines)} 行")
+          PYEOF
+
+      - name: 提交更新到仓库
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 检查是否有变化
+          if git diff --quiet ips.txt; then
+            echo "IP列表无变化，跳过提交"
           else
-            git commit -m "🔄 更新优选IP测速结果 $(date +'%Y-%m-%d %H:%M')"
+            git add ips.txt
+            git commit -m "auto: 更新CloudFlare优选IP $(date -u +'%Y-%m-%d %H:%M UTC')"
             git push
+            echo "IP列表已更新并推送到仓库"
           fi
