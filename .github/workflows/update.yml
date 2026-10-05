@@ -1,0 +1,62 @@
+name: Cloudflare 优选IP自动更新
+on:
+  schedule:
+    - cron: '0 */12 * * *'  # 每12小时执行一次
+  workflow_dispatch:        # 支持手动触发
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 创建tools目录
+        run: mkdir -p tools
+
+      - name: 下载 CloudflareSpeedTest v2.2.5
+        working-directory: tools
+        run: |
+          wget --timeout=30 --tries=3 https://mirror.ghproxy.com/https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz -O cst.tar.gz || \
+          wget --timeout=30 --tries=3 https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz -O cst.tar.gz || \
+          wget --timeout=30 --tries=3 https://cdn.jsdelivr.net/gh/XIU2/CloudflareSpeedTest@v2.2.5/CloudflareST_linux_amd64.tar.gz -O cst.tar.gz
+
+      - name: 解压测速工具
+        working-directory: tools
+        run: tar zxf cst.tar.gz && chmod +x CloudflareST && ls -la
+
+      - name: 运行测速（参数严格匹配v2.2.5，无-q参数）
+        working-directory: tools
+        run: |
+          ./CloudflareST \
+            -f ../ip-ranges.txt \
+            -o result.csv \
+            -n 200 \
+            -t 4 \
+            -dn 20 \
+            -dt 10 \
+            -tl 300 \
+            -tlr 0.2 \
+            -p 20
+
+      - name: 提取纯IP写入ips.txt（覆盖原文件）
+        run: |
+          if [ -f tools/result.csv ]; then
+            tail -n +2 tools/result.csv | cut -d ',' -f 1 > ips.txt
+            echo "提取完成，共 $(wc -l < ips.txt) 个IP"
+            cat ips.txt
+          else
+            echo "错误：未找到测速结果文件"
+            exit 1
+          fi
+
+      - name: 提交更新
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ips.txt
+          if git diff --staged --quiet; then
+            echo "IP列表无变化，跳过提交"
+          else
+            git commit -m "Auto update CF优选IP at $(date +'%Y-%m-%d %H:%M:%S')"
+            git push
+          fi
