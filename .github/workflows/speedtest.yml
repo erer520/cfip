@@ -4,8 +4,8 @@ on:
   push:
     branches: [ main, master ]
   schedule:
-    # 每 8 小时自动跑一次（UTC 0/6/12/18 点）
-    - cron: '0 */8 * * *'
+    # 每 6 小时自动跑一次（UTC 0/6/12/18 点）
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       speed_limit:
