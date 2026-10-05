@@ -1,0 +1,6 @@
+# 测速程序与中间文件不入库（results 目录要保留，不要写进这里）
+cfst
+cfst.tar.gz
+cfst_linux_amd64/
+merged_ip.txt
+result.csv
