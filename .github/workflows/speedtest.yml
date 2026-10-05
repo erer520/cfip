@@ -1,156 +1,59 @@
-name: CloudFlare IP 自动优选更新
+name: Cloudflare 优选IP自动更新
 
-# 触发条件：
-# 1. 每12小时自动运行（0点和12点 UTC，即北京时间8点和20点）
-# 2. 手动触发（workflow_dispatch）
-# 3. push到main分支时
 on:
   schedule:
-    - cron: '0 */12 * * *'
-  workflow_dispatch:
+    - cron: '0 0,12 * * *'  # 每12小时更新一次（UTC时间，对应北京时间8点/20点）
+  workflow_dispatch:  # 支持手动触发
   push:
-    branches:
-      - main
     paths:
-      - 'ip-ranges.txt'
-      - '.github/workflows/cf-ip-update.yml'
+      - 'ip-ranges.txt'  # 网段列表变更时自动触发
 
 jobs:
-  update-ips:
+  update-ip:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
-      - name: 检出仓库代码
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置 Go 环境
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: 安装 CloudflareSpeedTest
+      - name: 下载 CloudflareSpeedTest（稳定版 v2.2.5）
         run: |
-          # 下载最新版 CloudflareSpeedTest
-          wget -q https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/CloudflareST_linux_amd64.tar.gz -O cfst.tar.gz
-          tar -xzf cfst.tar.gz
-          chmod +x CloudflareST
-          ./CloudflareST -v
-
-      - name: 准备待扫描IP段
-        run: |
-          # 把用户自定义的IP段写入 ip-ranges.txt（如果文件存在则用现有内容）
-          if [ ! -f ip-ranges.txt ]; then
-            cat > ip-ranges.txt << 'EOF'
-          198.41.213.0/24
-          104.19.197.0/24
-          104.18.128.0/24
-          172.64.32.0/24
-          104.17.0.0/24
-          104.18.62.0/24
-          104.18.36.0/24
-          104.17.1.0/24
-          104.18.132.0/24
-          104.16.36.0/24
-          172.67.133.0/24
-          104.18.100.0/24
-          104.27.204.0/24
-          172.64.150.0/24
-          104.16.35.0/24
-          104.16.2.0/24
-          104.18.131.0/24
-          104.19.199.0/24
-          104.19.198.0/24
-          104.19.195.0/24
-          104.16.0.0/24
-          104.18.129.0/24
-          104.17.2.0/24
-          104.16.1.0/24
-          104.19.196.0/24
-          141.101.115.0/24
-          104.18.130.0/24
-          172.64.151.0/24
-          104.18.35.0/24
-          141.101.122.0/24
-          EOF
-          fi
-          echo "=== 待扫描IP段 ==="
-          cat ip-ranges.txt
-          echo "=== IP段数量 ==="
-          grep -c '/' ip-ranges.txt
-
-      - name: 运行 CloudflareSpeedTest 测速
-        run: |
-          # 测速参数说明：
-          # -f ip-ranges.txt  : 使用自定义IP段
-          # -n 500            : 测速线程数，越大越快
-          # -t 8              : 延迟测试次数（对每个IP测8次取平均）
-          # -dn 10            : 下载测速数量（从延迟合格的IP里选10个测下载速度）
-          # -dt 8             : 下载测速时间（秒）
-          # -tl 300           : 延迟上限(ms)，超过300ms直接淘汰
-          # -tll 0            : 延迟下限(ms)，0=不限制
-          # -sl 0             : 下载速度下限(MB/s)，0=不限制（可按需设置，如1=至少1MB/s）
-          # -p 0              : 显示结果数量，0=全部
-          # -o result.csv     : 结果输出到csv
-          # -url              : 测速用的文件URL，默认Cloudflare官方CDN
-          timeout 15m ./CloudflareST \
-            -f ip-ranges.txt \
-            -n 500 \
-            -t 8 \
-            -dn 20 \
-            -dt 8 \
-            -tl 300 \
-            -sl 0 \
-            -p 0 \
-            -o result.csv \
-            -httping
-          echo "=== 测速完成，result.csv 内容 ==="
-          cat result.csv
-
-      - name: 提取纯IP并更新 ips.txt
-        run: |
-          python3 << 'PYEOF'
-          import csv
-
-          # 读取result.csv，跳过表头
-          ips = []
-          with open('result.csv', 'r', encoding='utf-8') as f:
-              reader = csv.reader(f)
-              header = next(reader)  # 跳过表头
-              print("表头:", header)
-              for row in reader:
-                  if row and len(row) >= 1:
-                      ip = row[0].strip()
-                      if ip:
-                          ips.append(ip)
-
-          print(f"共筛选出 {len(ips)} 个IP")
-
-          # 只保留纯IP，每行一个，覆盖写入 ips.txt
-          with open('ips.txt', 'w', encoding='utf-8') as f:
-              for ip in ips:
-                  f.write(ip + '\n')
-
-          print("=== 生成的 ips.txt 内容预览（前20行） ===")
-          with open('ips.txt', 'r', encoding='utf-8') as f:
-              lines = f.readlines()
-              for line in lines[:20]:
-                  print(line.rstrip())
-          print(f"... 共 {len(lines)} 行")
-          PYEOF
-
-      - name: 提交更新到仓库
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p tools
+          # 主下载源（GitHub镜像）
+          wget -q --timeout=30 --tries=3 -O tools/cfst.tgz "https://github.91chi.fun/https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz" || \
+          # 备用源1（官方直连）
+          wget -q --timeout=30 --tries=3 -O tools/cfst.tgz "https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz" || \
+          # 备用源2（jsDelivr CDN）
+          wget -q --timeout=30 --tries=3 -O tools/cfst.tgz "https://cdn.jsdelivr.net/gh/XIU2/CloudflareSpeedTest@v2.2.5/CloudflareST_linux_amd64.tar.gz"
           
-          # 检查是否有变化
+          tar zxf tools/cfst.tgz -C tools/
+          chmod +x tools/CloudflareST
+          ls -la tools/
+
+      - name: 运行测速并提取纯IP
+        run: |
+          cd tools
+          # 从上级目录读取网段配置
+          ./CloudflareST -f ../ip-ranges.txt -tl 300 -sl 0 -dn 10 -t 5 -p 0 -o result.csv -q
+          
+          # 提取IP（跳过第一行表头，只取第一列，去重）
+          tail -n +2 result.csv | cut -d',' -f1 | uniq > ../ips.txt
+          
+          echo "===== 测速完成，优选IP列表 ====="
+          cat ../ips.txt
+          echo ""
+          echo "共 $(wc -l < ../ips.txt) 个优选IP"
+
+      - name: 提交更新
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 检查文件是否有变化
           if git diff --quiet ips.txt; then
             echo "IP列表无变化，跳过提交"
           else
             git add ips.txt
-            git commit -m "auto: 更新CloudFlare优选IP $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git commit -m "🔄 自动更新优选IP $(date +'%Y-%m-%d %H:%M:%S')"
             git push
-            echo "IP列表已更新并推送到仓库"
+            echo "已提交并推送更新"
           fi
